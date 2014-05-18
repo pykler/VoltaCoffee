@@ -1,7 +1,7 @@
 #include <Adafruit_CC3000.h>
 #include <SPI.h>
 #include "utility/debug.h"
-#include "utility/socket.h"
+#include "config.h"
 
 // These are the interrupt and control pins
 #define ADAFRUIT_CC3000_IRQ   3  // MUST be an interrupt pin!
@@ -13,25 +13,12 @@
 Adafruit_CC3000 cc3000 = Adafruit_CC3000(ADAFRUIT_CC3000_CS, ADAFRUIT_CC3000_IRQ, ADAFRUIT_CC3000_VBAT,
                                          SPI_CLOCK_DIVIDER); // you can change this clock speed but DI
 
-// #define WLAN_SSID       "Coffee"        // cannot be longer than 32 characters!
-// #define WLAN_PASS       "Coffee123"
-//#define WLAN_SSID       "Aria2.4GHz"        // cannot be longer than 32 characters!
-//#define WLAN_PASS       "asdfasdfasdf"
-#define WLAN_SSID "Volta"
-#define WLAN_PASS "VoltaSecure"
-
-// Security can be WLAN_SEC_UNSEC, WLAN_SEC_WEP, WLAN_SEC_WPA or WLAN_SEC_WPA2
-#define WLAN_SECURITY   WLAN_SEC_WPA2
-
 #define BAUDRATE 115200
 
-#define LISTEN_PORT           23    // What TCP port to listen on for connections.
 #define OUTPIN 8
 #define INPIN 9
-#define BUFSIZ 128
 
-Adafruit_CC3000_Server echoServer(LISTEN_PORT);
-
+Adafruit_CC3000_Client client;
 
 void setup(void)
 {
@@ -65,52 +52,124 @@ void setup(void)
     delay(1000);
   }
   
-  // Start listening for connections
-  echoServer.begin();
-  
-  Serial.print(F("Listening for connections... on PORT "));
-  Serial.println(LISTEN_PORT, DEC);
   pinMode(OUTPIN, OUTPUT);
   pinMode(INPIN, INPUT);
+  
 }
 
-void loop(void)
-{
-  char buffer[BUFSIZ];
-  uint32_t flags = 0;
-  int16_t last_size;
-  String input;
+void loop(void) {
+  callProxy();
+  delay(1000 * 60 * 60);
+  Serial.println("Waiting 1 hr");
+}
+
+boolean callProxy(void) {
+  uint32_t ip = 0L, t;
+  const unsigned long
+    connectTimeout  = 15L * 1000L; // Max time to wait for server connection
+
   
-  Adafruit_CC3000_ClientRef client = echoServer.available();
-  if (client) {
-     // Check if there is data available to read.
-     if (client.available() > 0) {
-       // Read a byte and write it to all clients.
-       last_size = client.read(buffer, sizeof(buffer) - 1, flags);
-       // adding the null char to buffer
-       if (last_size > -1) {
-         buffer[last_size] = '\0';
-       } else {
-         buffer[0] = '\0';
-       }      
-       input = String(buffer);
-       Serial.println(input);
-       if (input.startsWith("on")) {
-         digitalWrite(OUTPIN, HIGH);
-         client.write("on sent\n", 9, flags);
-       } else if (input.startsWith("off")) {
-         digitalWrite(OUTPIN, LOW);
-         client.write("off sent\n", 10, flags);
-       } else if (input.startsWith("status")) {
-         if (digitalRead(INPIN) == HIGH) {
-           client.write("on\n", 3, flags);
-         } else {
-           client.write("off\n", 4, flags);         
-         }
-       }
-       
-     }
+  // Look up server's IP address
+  Serial.print(F("\r\nGetting server IP address..."));
+  t = millis();
+  while((0L == ip) && ((millis() - t) < connectTimeout)) {
+    if(cc3000.getHostByName(TWITTER_PROXY, &ip)) break;
+    delay(1000);
   }
+  if(0L == ip) {
+    Serial.println(F("failed"));
+    return 0;
+  }
+  cc3000.printIPdotsRev(ip);
+  Serial.println();
+  
+  // Request JSON-formatted data from server (port 80)
+  Serial.print(F("Connecting to twitter proxy server..."));
+  client = cc3000.connectTCP(ip, 80);
+  if(client.connected()) {
+    Serial.print(F("connected.\r\nRequesting data..."));
+    char msg[64];
+    sprintf(msg, "Volta Coffee Machine, awaiting orders :) <-- %d", millis());
+    sendTweet(msg, "");
+  } else {
+    Serial.println(F("failed"));
+    return 0;
+  }
+  
+  Serial.print(F("OK\r\nAwaiting response..."));
+  char c = 0;
+  // Dirty trick: instead of parsing results, just look for opening
+  // curly brace indicating the start of a successful JSON response.
+  while(((c = timedRead()) > 0) && (c != '{'));
+  if(c == '{')   Serial.println(F("success!"));
+  else if(c < 0) Serial.println(F("timeout"));
+  else           Serial.println(F("error (invalid Twitter credentials?)"));
+  client.close();
+  return (c == '{');
+}
+
+boolean control(String command) {
+  boolean status = false;
+  if (digitalRead(INPIN) == HIGH) status = true;
+
+  if (!status && command.startsWith("on")) {
+     digitalWrite(OUTPIN, HIGH);
+     return true;
+  }
+  if (status && command.startsWith("off")) {
+     digitalWrite(OUTPIN, LOW);
+     return true;
+  }
+  if (command.startsWith("status")) return status;
+
+  return false;
+}
+
+void sendTweet(char* msg, String reply_id) {
+  client.print(F("GET /twitter/"));
+  client.print(TWITTER_KEYID);
+  client.print(F("/statuses/update?status="));
+  urlEncode(client, msg, false, false);
+  if (reply_id != "") {
+    client.print(F("in_reply_to_status_id="));
+    client.print(reply_id);
+  }
+  client.print(F(" HTTP/1.0\r\n"));
+  client.print(F("HOST: "));
+  client.print(TWITTER_PROXY);
+  client.print(F("\r\n"));
+  client.print(F("Connection: close\r\n\r\n"));
+}
+
+void getCommand() {
+  client.print(F("GET /arduino/"));
+  client.print(TWITTER_KEYID);
+  client.print(F("/command"));
+  client.print(F(" HTTP/1.0\r\n"));
+  client.print(F("HOST: "));
+  client.print(TWITTER_PROXY);
+  client.print(F("\r\n"));
+  client.print(F("Connection: close\r\n\r\n"));
+}
+
+void respondCommand(char * msg, String mid) {
+  client.print(F("GET /arduino/"));
+  client.print(TWITTER_KEYID);
+  client.print(F("/respond?msg="));
+  urlEncode(client, msg, false, false);
+  client.print(F("&mid="));
+  client.print(mid);
+  client.print(F(" HTTP/1.0\r\n"));
+  client.print(F("HOST: "));
+  client.print(TWITTER_PROXY);
+  client.print(F("\r\n"));
+  client.print(F("Connection: close\r\n\r\n"));
+}
+
+int timedRead(void) {
+  unsigned long start = millis();
+  while((!client.available()) && ((millis() - start) < 5000L));
+  return client.read();  // -1 on timeout
 }
 
 /**************************************************************************/
@@ -138,3 +197,30 @@ bool displayConnectionDetails(void)
     return true;
   }
 }
+
+// URL-encoding output function for Print class.
+// Input from RAM or PROGMEM (flash).  Double-encoding is a weird special
+// case for Oauth (encoded strings get encoded a second time).
+static const char PROGMEM hexChar[] = "0123456789ABCDEF";
+void urlEncode(
+  Print      &p,       // EthernetClient, Sha1, etc.
+  const char *src,     // String to be encoded
+  boolean     progmem, // If true, string is in PROGMEM (else RAM)
+  boolean     x2)      // If true, "double encode" parenthesis
+{
+  uint8_t c;
+
+  while((c = (progmem ? pgm_read_byte(src) : *src))) {
+    if(((c >= 'a') && (c <= 'z')) || ((c >= 'A') && (c <= 'Z')) ||
+       ((c >= '0') && (c <= '9')) || strchr_P(PSTR("-_.~"), c)) {
+      p.write(c);
+    } else {
+      if(x2) p.print("%25");
+      else   p.write('%');
+      p.write(pgm_read_byte(&hexChar[c >> 4]));
+      p.write(pgm_read_byte(&hexChar[c & 15]));
+    }
+    src++;
+  }
+}
+
