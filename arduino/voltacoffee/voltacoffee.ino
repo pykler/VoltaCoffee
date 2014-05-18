@@ -55,16 +55,45 @@ void setup(void)
   pinMode(OUTPIN, OUTPUT);
   pinMode(INPIN, INPUT);
   
+  // startup();
+  
 }
 
 void loop(void) {
-  callProxy();
-  delay(1000 * 60 * 60);
-  Serial.println("Waiting 1 hr");
+  Serial.println(F("LOOP"));
+  char buf[300], command[30], mid[60], c;
+  int bufsiz=sizeof(buf), stat;
+  String res;
+  Serial.println(F("Checking Commands"));
+  if (pconnect()) { 
+    getCommand();
+    while(((c = timedRead()) > 0) && (c != '*'));
+    if (c == '*') {
+      clientRead(buf, bufsiz);
+      Serial.println(String(buf));
+      if (buf[0] == 's'){
+        sscanf(buf, "%s %s", command, mid);
+        Serial.println(String(command));
+        stat = control(String(command));
+        res = String(command) + " " + String(stat, DEC);
+        res.toCharArray(command, 30);
+        Serial.println(F("Responding now"));
+        client.close(); delay(1000);
+        while (!pconnect());
+        respondCommand(command, String(mid));
+        timedRead();
+        client.close();
+        Serial.println(F("done"));
+        
+      }
+    }
+  }
+  Serial.println(F("Waiting ..."));
+  delay(5000);
 }
 
-boolean callProxy(void) {
-  uint32_t ip = 0L, t;
+boolean pconnect(void) {
+    uint32_t ip = 0L, t;
   const unsigned long
     connectTimeout  = 15L * 1000L; // Max time to wait for server connection
 
@@ -88,12 +117,18 @@ boolean callProxy(void) {
   client = cc3000.connectTCP(ip, 80);
   if(client.connected()) {
     Serial.print(F("connected.\r\nRequesting data..."));
-    char msg[64];
-    sprintf(msg, "Volta Coffee Machine, awaiting orders :) <-- %d", millis());
-    sendTweet(msg, "");
+    return 1;
   } else {
     Serial.println(F("failed"));
     return 0;
+  }
+}
+
+boolean startup(void) {
+  if(pconnect()) {
+    char msg[64];
+    sprintf(msg, "Volta Coffee Machine, awaiting orders :) <-- %d", millis());
+    sendTweet(msg, "");
   }
   
   Serial.print(F("OK\r\nAwaiting response..."));
@@ -112,11 +147,11 @@ boolean control(String command) {
   boolean status = false;
   if (digitalRead(INPIN) == HIGH) status = true;
 
-  if (!status && command.startsWith("on")) {
+  if (!status && command.startsWith("start")) {
      digitalWrite(OUTPIN, HIGH);
      return true;
   }
-  if (status && command.startsWith("off")) {
+  if (status && command.startsWith("stop")) {
      digitalWrite(OUTPIN, LOW);
      return true;
   }
@@ -155,7 +190,7 @@ void getCommand() {
 void respondCommand(char * msg, String mid) {
   client.print(F("GET /arduino/"));
   client.print(TWITTER_KEYID);
-  client.print(F("/respond?msg="));
+  client.print(F("/respond?command="));
   urlEncode(client, msg, false, false);
   client.print(F("&mid="));
   client.print(mid);
@@ -168,8 +203,18 @@ void respondCommand(char * msg, String mid) {
 
 int timedRead(void) {
   unsigned long start = millis();
-  while((!client.available()) && ((millis() - start) < 5000L));
+  while((!client.available()) && ((millis() - start) < 500L));
   return client.read();  // -1 on timeout
+}
+
+int clientRead(char* buf, int len) {
+  int last_size = 0, startTime = millis();
+  while((!client.available()) &&
+        ((millis() - startTime) < 500L));
+  if(client.available()) {
+    last_size = client.read(buf, len-1);
+    buf[last_size] = 0;
+  }
 }
 
 /**************************************************************************/
